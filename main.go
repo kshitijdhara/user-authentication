@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"user-authentication/database"
 	"user-authentication/routes"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/sessions"
+	"github.com/joho/godotenv"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 	"github.com/markbates/goth/providers/google"
@@ -14,14 +16,18 @@ import (
 
 func startServer() {
 	router := gin.Default()
-	_, err := database.GetDatabaseClient()
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Printf("Error loading .env file: %s", err)
+	}
+	_, err = database.GetDatabaseClient()
 	if err != nil {
 		fmt.Printf("Cannot connect to database: %s", err)
 		return
 	}
 	key := "super"
-	clientID := "client-id-from-google"
-	clientSecret := "client-secret-from-google"
+	clientID := os.Getenv("GOOGLE_CLIENT_ID")
+	clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
 	clientCallback := "http://localhost:8009/auth/google/callback"
 	maxAge := 86400 * 30
 	store := sessions.NewCookieStore([]byte(key))

@@ -15,23 +15,24 @@ func userLogin(ctx *gin.Context) {
 		return
 	}
 	email := body.Email
-	password := body.Password
+	// password := body.Password
 
 	db, err := database.GetDatabaseClient()
 	if err != nil {
 		ctx.String(500, "Database connection error: %s, %s", err, db)
 		return
 	}
-	var storedPassword string
-	err = db.QueryRow("SELECT password FROM users WHERE email=$1", email).Scan(&storedPassword)
+	var storedPassword, id string
+	err = db.QueryRow("SELECT password, id FROM users WHERE email=$1", email).Scan(&storedPassword, &id)
 	if err != nil {
 		ctx.String(401, "Invalid username or password")
 		return
 	}
-	if storedPassword != password {
-		ctx.String(401, "Invalid password for user %s", email)
-		return
+	token, err := helpers.CreateJWTToken(id)
+	if err != nil {
+		ctx.String(500, "Error creating JWT token: %s", err)
 	}
+	ctx.SetCookie("user-token", token, 3600, "/", "localhost", false, true)
 	ctx.String(200, "Login successful")
 }
 
@@ -88,7 +89,7 @@ func callBackHandler(ctx *gin.Context) {
 		return
 	}
 	if !exists {
-		err = helpers.CreateUser(user.Email, user.FirstName, user.LastName, "", "user")
+		userId, err = helpers.CreateUser(user.Email, user.FirstName, user.LastName, "", "user")
 		if err != nil {
 			ctx.AbortWithError(500, err)
 			return
@@ -100,6 +101,6 @@ func callBackHandler(ctx *gin.Context) {
 		ctx.AbortWithError(500, err)
 		return
 	}
-	ctx.SetCookie("user-token", token, 3600, "/", "try-saga.com", false, true) // how do you share the token with frontend?
+	ctx.SetCookie("user-token", token, 3600, "/", "localhost", false, true) // how do you share the token with frontend?
 	ctx.String(200, "Authentication successful. Token: %s", token)
 }
