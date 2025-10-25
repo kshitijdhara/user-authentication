@@ -1,0 +1,4 @@
+add authentication middleware
+    use oauth2 based authentication
+    configure middleware to validate tokens
+    set up routes to require authentication
