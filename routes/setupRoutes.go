@@ -22,4 +22,6 @@ func SetupRoutes(router *gin.Engine) {
 
 	router.POST("/login", userLogin)
 	router.POST("/signup", userSignUp)
+	router.GET("/auth/:provider", loginWithGoogle)
+	router.GET("/auth/:provider/callback", callBackHandler)
 }

@@ -5,6 +5,7 @@ import (
 	"user-authentication/helpers"
 
 	"github.com/gin-gonic/gin"
+	"github.com/markbates/goth/gothic"
 )
 
 func userLogin(ctx *gin.Context) {
@@ -52,4 +53,53 @@ func userSignUp(ctx *gin.Context) {
 		return
 	}
 	ctx.String(200, "user created successfully")
+}
+
+func loginWithGoogle(ctx *gin.Context) {
+	provider := ctx.Param("provider")
+	if provider != "google" {
+		ctx.String(400, "Unsupported provider: %s", provider)
+		return
+	}
+	q := ctx.Request.URL.Query()
+	q.Add("provider", provider)
+	ctx.Request.URL.RawQuery = q.Encode()
+	gothic.BeginAuthHandler(ctx.Writer, ctx.Request)
+}
+
+func callBackHandler(ctx *gin.Context) {
+	provider := ctx.Param("provider")
+	if provider != "google" {
+		ctx.String(400, "Unsupported provider: %s", provider)
+		return
+	}
+	q := ctx.Request.URL.Query()
+	q.Add("provider", provider)
+	ctx.Request.URL.RawQuery = q.Encode()
+	user, err := gothic.CompleteUserAuth(ctx.Writer, ctx.Request)
+	if err != nil {
+		ctx.AbortWithError(500, err)
+		return
+	}
+
+	userId, exists, err := helpers.NewUserCheck(user.Email)
+	if err != nil {
+		ctx.AbortWithError(500, err)
+		return
+	}
+	if !exists {
+		err = helpers.CreateUser(user.Email, user.FirstName, user.LastName, "", "user")
+		if err != nil {
+			ctx.AbortWithError(500, err)
+			return
+		}
+	}
+
+	token, err := helpers.CreateJWTToken(userId)
+	if err != nil {
+		ctx.AbortWithError(500, err)
+		return
+	}
+	ctx.SetCookie("user-token", token, 3600, "/", "try-saga.com", false, true) // how do you share the token with frontend?
+	ctx.String(200, "Authentication successful. Token: %s", token)
 }
