@@ -104,3 +104,33 @@ func callBackHandler(ctx *gin.Context) {
 	ctx.SetCookie("user-token", token, 3600, "/", "localhost", false, true) // how do you share the token with frontend?
 	ctx.String(200, "Authentication successful. Token: %s", token)
 }
+
+func LogoutHandler(ctx *gin.Context) {
+	// If route has a provider param (e.g. /auth/:provider/logout) treat as goth logout
+	provider := ctx.Param("provider")
+	if provider != "" {
+		// ensure gothic sees the provider
+		q := ctx.Request.URL.Query()
+		q.Add("provider", provider)
+		ctx.Request.URL.RawQuery = q.Encode()
+
+		// gothic.Logout clears provider session; some providers may also require a remote logout redirect
+		if err := gothic.Logout(ctx.Writer, ctx.Request); err != nil {
+			ctx.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		// clear local token cookie
+		ctx.SetCookie("user-token", "", -1, "/", "localhost", false, true)
+
+		// optional: redirect back to frontend or provider-specific logout page
+		redirectTo := ctx.Query("redirect")
+		if redirectTo == "" {
+			redirectTo = "/"
+		}
+		ctx.Redirect(302, redirectTo)
+		return
+	}
+	ctx.SetCookie("user-token", "", -1, "/", "localhost", false, true)
+	ctx.JSON(200, gin.H{"message": "Logged out successfully"})
+}

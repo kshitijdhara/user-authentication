@@ -13,6 +13,19 @@ func SetupRoutes(router *gin.Engine) {
 	router.POST("/signup", userSignUp)
 	router.GET("/auth/:provider", loginWithGoogle)
 	router.GET("/auth/:provider/callback", callBackHandler)
+	router.GET("/auth/:provider/logout", LogoutHandler)
+	router.GET("/health", func(ctx *gin.Context) {
+		db, err := database.GetDatabaseClient()
+		if err != nil {
+			ctx.JSON(500, gin.H{"db": "disconnected", "error": err.Error()})
+			return
+		}
+		if err := db.Ping(); err != nil {
+			ctx.JSON(500, gin.H{"db": "ping_failed", "error": err.Error()})
+			return
+		}
+		ctx.JSON(200, gin.H{"db": "ok", "status": "healthy"})
+	})
 
 	apirouter := router.Group("/api", helpers.AuthMiddleware())
 	{
@@ -28,5 +41,6 @@ func SetupRoutes(router *gin.Engine) {
 			}
 			ctx.JSON(200, gin.H{"db": "ok"})
 		})
+		apirouter.GET("/logout", LogoutHandler)
 	}
 }
