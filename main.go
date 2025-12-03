@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"user-authentication/database"
+	"user-authentication/proxy"
 	"user-authentication/routes"
 
 	"github.com/gin-gonic/gin"
@@ -37,6 +38,12 @@ func startServer() {
 	// goth.ClearProviders()
 	goth.UseProviders(google.New(clientID, clientSecret, clientCallback))
 	routes.SetupRoutes(router)
+
+	// Proxy Routes
+	// Example: Forward all requests starting with /app to a downstream service
+	// In a real microservices setup, you might have multiple proxies or a dynamic router
+	router.Any("/app/*path", proxy.ReverseProxy("http://localhost:8080"))
+
 	router.Run(":8009")
 }
 

@@ -4,11 +4,30 @@ A plug-and-play microservice for user authentication and authorization, built wi
 
 ## Features
 
+- **Dual-Token Authentication**: Access tokens (15 min) and refresh tokens (7 days) for enhanced security.
+- **Auto-Refresh**: Automatic token refresh on expiry without user intervention.
 - **User Registration**: Secure signup with password hashing (bcrypt).
-- **User Login**: JWT-based authentication.
+- **User Login**: JWT-based authentication with token pairs.
 - **OAuth**: Google OAuth integration.
+- **API Gateway**: Acts as a reverse proxy for downstream microservices with built-in authentication.
 - **Authorization**: Role-based access control (RBAC) ready middleware.
+- **Token Revocation**: Secure refresh token storage and revocation in PostgreSQL.
 - **Containerization**: Docker and Docker Compose support for easy deployment.
+
+## Integration Guide
+
+📖 **[View the complete integration guide](docs/INTEGRATION.md)** to learn how to:
+- Integrate this auth service with your web application (React, Vue, Angular, etc.)
+- Protect routes in your frontend and backend
+- Implement role-based access control (RBAC)
+- Use JWT tokens for authentication
+- Set up API gateways and middleware
+
+The guide includes complete code examples for:
+- Frontend SPA integration (React)
+- Backend proxy patterns (Node.js/Express)
+- API Gateway configuration (NGINX)
+- Security best practices
 
 ## Prerequisites
 
@@ -69,29 +88,38 @@ The service is configured via environment variables.
 
 -   `POST /signup`
     -   Body: `{"email": "user@example.com", "password": "password", "fname": "John", "lname": "Doe", "type": "user"}`
-    -   Description: Register a new user.
+    -   Response: Sets `access_token` (15 min) and `refresh_token` (7 days) cookies.
+    -   Description: Register a new user and receive token pair.
 
 -   `POST /login`
     -   Body: `{"email": "user@example.com", "password": "password"}`
-    -   Description: Login and receive a JWT token (and cookie).
+    -   Response: Sets `access_token` (15 min) and `refresh_token` (7 days) cookies.
+    -   Description: Login and receive JWT token pair.
 
 -   `GET /auth/google`
     -   Description: Initiate Google OAuth flow.
 
 -   `GET /auth/google/callback`
-    -   Description: Google OAuth callback.
+    -   Description: Google OAuth callback. Issues token pair on success.
 
 -   `GET /auth/google/logout`
-    -   Description: Logout.
+    -   Description: Logout from OAuth provider and revoke tokens.
 
 ### Protected Routes
 
 -   `GET /api/`
-    -   Headers: `Authorization: Bearer <token>`
+    -   Headers: `Authorization: Bearer <access_token>` (or via cookie)
     -   Description: Example protected route. Returns database status.
 
 -   `GET /api/logout`
-    -   Description: Logout handler.
+    -   Description: Logout handler. Revokes refresh token and clears cookies.
+
+### Reverse Proxy (API Gateway)
+
+-   `ANY /app/*path`
+    -   Description: Proxies requests to downstream services (default: `http://localhost:8080`).
+    -   Authentication: Automatically validates access token, refreshes if expired using refresh token.
+    -   Headers Added: `X-User-ID`, `X-User-Role`, `Authorization: Bearer <access_token>`
 
 ### Health
 
@@ -117,4 +145,30 @@ CREATE TABLE users (
     permission VARCHAR(50) DEFAULT 'user',
     is_verified BOOLEAN DEFAULT FALSE
 );
+
+CREATE TABLE refresh_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(255) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+## Architecture
+
+This service acts as an **API Gateway** for your microservices architecture:
+
+1. **Authentication Layer**: Handles user login, signup, and OAuth.
+2. **Token Management**: Issues and validates dual tokens (access + refresh).
+3. **Auto-Refresh Middleware**: Transparently refreshes expired access tokens.
+4. **Reverse Proxy**: Forwards authenticated requests to downstream services with user context.
+
+### Request Flow
+
+```
+Client → Auth Service (/app/*) → Validate/Refresh Token → Downstream Service
+                                ↓
+                         Add User Headers (X-User-ID, X-User-Role)
 ```

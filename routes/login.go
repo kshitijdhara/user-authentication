@@ -33,11 +33,12 @@ func userLogin(ctx *gin.Context) {
 		ctx.String(401, "Invalid username or password")
 		return
 	}
-	token, err := helpers.CreateJWTToken(id, userType)
+	accessToken, refreshToken, err := helpers.CreateTokenPair(id, userType)
 	if err != nil {
 		ctx.String(500, "Error creating JWT token: %s", err)
 	}
-	ctx.SetCookie("user-token", token, 3600, "/", "localhost", false, true)
+	ctx.SetCookie("access_token", accessToken, 900, "/", "localhost", false, true)
+	ctx.SetCookie("refresh_token", refreshToken, 604800, "/", "localhost", false, true)
 	ctx.String(200, "Login successful")
 }
 
@@ -57,12 +58,22 @@ func userSignUp(ctx *gin.Context) {
 		ctx.String(500, "Error hashing password: %s", err)
 		return
 	}
-	_, err = db.Exec("INSERT INTO users (id, first_name, last_name, email, user_type, image, password, version, created_at, updated_at, permission, is_verified) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 1, NOW(), NOW(), 'user', false)",
-		body.FirstName, body.LastName, body.Email, body.Type, "{}", string(hashedPassword))
+	var userId string
+	err = db.QueryRow("INSERT INTO users (id, first_name, last_name, email, user_type, image, password, version, created_at, updated_at, permission, is_verified) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 1, NOW(), NOW(), 'user', false) RETURNING id",
+		body.FirstName, body.LastName, body.Email, body.Type, "{}", string(hashedPassword)).Scan(&userId)
 	if err != nil {
 		ctx.String(500, "Error creating user: %s", err)
 		return
 	}
+
+	accessToken, refreshToken, err := helpers.CreateTokenPair(userId, body.Type)
+	if err != nil {
+		ctx.String(500, "Error creating JWT token: %s", err)
+		return
+	}
+	ctx.SetCookie("access_token", accessToken, 900, "/", "localhost", false, true)
+	ctx.SetCookie("refresh_token", refreshToken, 604800, "/", "localhost", false, true)
+
 	ctx.String(200, "user created successfully")
 }
 
@@ -106,16 +117,23 @@ func callBackHandler(ctx *gin.Context) {
 		}
 	}
 
-	token, err := helpers.CreateJWTToken(userId, "user")
+	accessToken, refreshToken, err := helpers.CreateTokenPair(userId, "user")
 	if err != nil {
 		ctx.AbortWithError(500, err)
 		return
 	}
-	ctx.SetCookie("user-token", token, 3600, "/", "localhost", false, true) // how do you share the token with frontend?
-	ctx.String(200, "Authentication successful. Token: %s", token)
+	ctx.SetCookie("access_token", accessToken, 900, "/", "localhost", false, true)
+	ctx.SetCookie("refresh_token", refreshToken, 604800, "/", "localhost", false, true)
+	ctx.String(200, "Authentication successful. Token: %s", accessToken)
 }
 
 func LogoutHandler(ctx *gin.Context) {
+	// Revoke refresh token if present
+	refreshToken, err := ctx.Cookie("refresh_token")
+	if err == nil && refreshToken != "" {
+		_ = helpers.RevokeRefreshToken(refreshToken)
+	}
+
 	// If route has a provider param (e.g. /auth/:provider/logout) treat as goth logout
 	provider := ctx.Param("provider")
 	if provider != "" {
@@ -130,8 +148,9 @@ func LogoutHandler(ctx *gin.Context) {
 			return
 		}
 
-		// clear local token cookie
-		ctx.SetCookie("user-token", "", -1, "/", "localhost", false, true)
+		// clear local token cookies
+		ctx.SetCookie("access_token", "", -1, "/", "localhost", false, true)
+		ctx.SetCookie("refresh_token", "", -1, "/", "localhost", false, true)
 
 		// optional: redirect back to frontend or provider-specific logout page
 		redirectTo := ctx.Query("redirect")
@@ -141,6 +160,7 @@ func LogoutHandler(ctx *gin.Context) {
 		ctx.Redirect(302, redirectTo)
 		return
 	}
-	ctx.SetCookie("user-token", "", -1, "/", "localhost", false, true)
+	ctx.SetCookie("access_token", "", -1, "/", "localhost", false, true)
+	ctx.SetCookie("refresh_token", "", -1, "/", "localhost", false, true)
 	ctx.JSON(200, gin.H{"message": "Logged out successfully"})
 }
