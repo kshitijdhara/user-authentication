@@ -1,264 +1,299 @@
 # Authentication Service Integration Guide
 
-This guide explains how to integrate your authentication service with any web application and protect routes using JWT tokens.
+This guide explains how to integrate your authentication service with any web application and protect routes using the dual-token JWT system.
 
 ## Overview
 
 Your authentication service provides:
-- **JWT-based authentication** with Bearer tokens
-- **Cookie-based sessions** for browser clients
-- **OAuth support** (Google)
-- **Role-based access control** (RBAC) ready
+- **Dual-Token Authentication**: Access tokens (15 min) + Refresh tokens (7 days)
+- **Auto-Refresh**: Automatic token refresh on expiry
+- **Built-in API Gateway**: Reverse proxy with authentication for downstream services
+- **OAuth support**: Google OAuth integration
+- **Role-based access control**: RBAC ready
+- **Token Revocation**: Secure refresh token management
 
 ## Authentication Flow
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant WebApp
     participant AuthService
     participant Database
+    participant DownstreamService
 
-    Client->>WebApp: Access protected route
-    WebApp->>AuthService: POST /login (email, password)
+    Client->>AuthService: POST /login (email, password)
     AuthService->>Database: Validate credentials
     Database-->>AuthService: User data
-    AuthService-->>WebApp: JWT token + cookie
-    WebApp->>Client: Store token
-    Client->>WebApp: Request with Authorization header
-    WebApp->>AuthService: Validate token (middleware)
-    AuthService-->>WebApp: User ID + Role
-    WebApp->>Client: Protected resource
+    AuthService-->>Client: Access Token (15m) + Refresh Token (7d)
+    
+    Client->>AuthService: GET /app/resource (with tokens)
+    AuthService->>AuthService: Validate Access Token
+    alt Access Token Valid
+        AuthService->>DownstreamService: Forward request + user headers
+        DownstreamService-->>AuthService: Response
+        AuthService-->>Client: Response
+    else Access Token Expired
+        AuthService->>Database: Validate Refresh Token
+        Database-->>AuthService: Valid
+        AuthService->>AuthService: Issue New Token Pair
+        AuthService->>DownstreamService: Forward request + user headers
+        DownstreamService-->>AuthService: Response
+        AuthService-->>Client: Response + New Tokens
+    end
 ```
 
 ## Integration Approaches
 
-### Approach 1: Frontend Integration (Recommended for SPAs)
+### Approach 1: Use Built-in API Gateway (Recommended)
 
-Use this approach when your web app is a Single Page Application (React, Vue, Angular, etc.).
+The auth service now acts as an API gateway. **All requests to your downstream services should flow through it.**
 
-#### Step 1: User Login
+#### Architecture
+
+```
+Client → Auth Service (/app/*) → Auto-Refresh Logic → Downstream Service
+                                         ↓
+                              Add Headers: X-User-ID, X-User-Role
+```
+
+#### Step 1: Configure Downstream Services
+
+In [`main.go`](file:///Users/kshitijdhara/Public/user-authentication/main.go), the proxy is configured:
+
+```go
+router.Any("/app/*path", proxy.ReverseProxy("http://localhost:8080"))
+```
+
+Update this to point to your actual service(s). For multiple services:
+
+```go
+router.Any("/users/*path", proxy.ReverseProxy("http://user-service:8080"))
+router.Any("/orders/*path", proxy.ReverseProxy("http://order-service:8081"))
+router.Any("/products/*path", proxy.ReverseProxy("http://product-service:8082"))
+```
+
+#### Step 2: Frontend Integration
 
 ```javascript
-// Login function
+// Login and get tokens
 async function login(email, password) {
   const response = await fetch('http://localhost:8009/login', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     credentials: 'include', // Important: includes cookies
     body: JSON.stringify({ email, password })
   });
 
   if (response.ok) {
-    // Cookie is automatically set by the auth service
-    // You can also extract token from response if needed
+    // Tokens are set as cookies: access_token, refresh_token
     return { success: true };
-  } else {
-    throw new Error('Login failed');
+  }
+  throw new Error('Login failed');
+}
+
+// Access downstream services through the gateway
+async function getUserProfile() {
+  const response = await fetch('http://localhost:8009/app/profile', {
+    credentials: 'include', // Send cookies
+  });
+
+  if (response.ok) {
+    return await response.json();
+  } else if (response.status === 401) {
+    // Session expired, redirect to login
+    window.location.href = '/login';
   }
 }
 ```
 
-#### Step 2: User Signup
+#### Step 3: Downstream Service Implementation
+
+Your downstream services receive authenticated requests with user context:
 
 ```javascript
-async function signup(email, password, firstName, lastName, userType = 'user') {
-  const response = await fetch('http://localhost:8009/signup', {
+// Example: Node.js downstream service
+const express = require('express');
+const app = express();
+
+app.get('/profile', (req, res) => {
+  // User info is in headers (added by auth service)
+  const userId = req.headers['x-user-id'];
+  const userRole = req.headers['x-user-role'];
+  
+  // Fetch user data from your database
+  res.json({
+    userId,
+    role: userRole,
+    // ... other user data
+  });
+});
+
+app.listen(8080);
+```
+
+```python
+# Example: Python/Flask downstream service
+from flask import Flask, request
+
+app = Flask(__name__)
+
+@app.route('/profile')
+def profile():
+    user_id = request.headers.get('X-User-ID')
+    user_role = request.headers.get('X-User-Role')
+    
+    return {
+        'userId': user_id,
+        'role': user_role,
+        # ... other user data
+    }
+
+if __name__ == '__main__':
+    app.run(port=8080)
+```
+
+---
+
+### Approach 2: Frontend-Only Integration
+
+If you don't want to use the built-in gateway, you can integrate directly from your frontend.
+
+#### Token Management
+
+```javascript
+// auth.js
+const AUTH_API = 'http://localhost:8009';
+
+export async function login(email, password) {
+  const response = await fetch(`${AUTH_API}/login`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ email, password })
+  });
+
+  if (response.ok) {
+    // Tokens are stored as cookies automatically
+    return { success: true };
+  }
+  throw new Error('Login failed');
+}
+
+export async function signup(email, password, firstName, lastName) {
+  const response = await fetch(`${AUTH_API}/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({
       email,
       password,
       fname: firstName,
       lname: lastName,
-      type: userType
+      type: 'user'
     })
   });
 
   if (response.ok) {
     return { success: true };
-  } else {
-    throw new Error('Signup failed');
   }
+  throw new Error('Signup failed');
 }
-```
 
-#### Step 3: Making Authenticated Requests
-
-**Option A: Using Cookies (Simpler)**
-
-```javascript
-// The auth service sets a cookie, but you need to extract and use the token
-// For cross-origin requests, you'll need to use the Authorization header
-
-async function getProtectedData() {
-  // Get token from cookie
-  const token = getCookie('user-token');
-  
-  const response = await fetch('http://localhost:8009/api/', {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-    },
+export function logout() {
+  // Call logout endpoint to revoke refresh token
+  fetch(`${AUTH_API}/api/logout`, {
+    credentials: 'include'
   });
-
-  if (response.ok) {
-    return await response.json();
-  } else if (response.status === 401) {
-    // Redirect to login
-    window.location.href = '/login';
-  }
+  
+  // Clear cookies
+  document.cookie = 'access_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
+  document.cookie = 'refresh_token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
 }
 
-// Helper function to get cookie
 function getCookie(name) {
   const value = `; ${document.cookie}`;
   const parts = value.split(`; ${name}=`);
   if (parts.length === 2) return parts.pop().split(';').shift();
 }
-```
 
-**Option B: Using localStorage (More Flexible)**
-
-Modify your auth service to return the token in the response body, or extract it from the callback response.
-
-```javascript
-// Store token after login
-async function login(email, password) {
-  const response = await fetch('http://localhost:8009/login', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ email, password })
-  });
-
-  if (response.ok) {
-    // Extract token from cookie and store in localStorage
-    const token = getCookie('user-token');
-    localStorage.setItem('authToken', token);
-    return { success: true };
-  }
+export function getAccessToken() {
+  return getCookie('access_token');
 }
 
-// Use token in requests
-async function getProtectedData() {
-  const token = localStorage.getItem('authToken');
-  
-  if (!token) {
-    window.location.href = '/login';
-    return;
-  }
-
-  const response = await fetch('http://localhost:8009/api/', {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-    },
-  });
-
-  if (response.ok) {
-    return await response.json();
-  } else if (response.status === 401) {
-    localStorage.removeItem('authToken');
-    window.location.href = '/login';
-  }
+export function isAuthenticated() {
+  return !!getAccessToken();
 }
 ```
 
-#### Step 4: Create an API Client with Interceptors
+#### API Client with Manual Refresh
 
 ```javascript
 // api-client.js
-class APIClient {
-  constructor(baseURL) {
-    this.baseURL = baseURL;
+import { getAccessToken, logout } from './auth';
+
+const AUTH_API = 'http://localhost:8009';
+const APP_API = 'http://localhost:3000';
+
+async function refreshTokens() {
+  // The auth service handles refresh automatically via cookies
+  // Just make a request to a protected endpoint
+  const response = await fetch(`${AUTH_API}/api/`, {
+    credentials: 'include'
+  });
+  
+  return response.ok;
+}
+
+export async function fetchWithAuth(url, options = {}) {
+  const token = getAccessToken();
+  
+  const config = {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+    credentials: 'include'
+  };
+
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
   }
 
-  async request(endpoint, options = {}) {
-    const token = localStorage.getItem('authToken');
+  let response = await fetch(url, config);
+
+  // If 401, try to refresh
+  if (response.status === 401) {
+    const refreshed = await refreshTokens();
     
-    const config = {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
-    };
-
-    // Add Authorization header if token exists
-    if (token) {
-      config.headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    const response = await fetch(`${this.baseURL}${endpoint}`, config);
-
-    // Handle 401 Unauthorized
-    if (response.status === 401) {
-      localStorage.removeItem('authToken');
+    if (refreshed) {
+      // Retry with new token
+      const newToken = getAccessToken();
+      config.headers['Authorization'] = `Bearer ${newToken}`;
+      response = await fetch(url, config);
+    } else {
+      // Refresh failed, logout
+      logout();
       window.location.href = '/login';
-      throw new Error('Unauthorized');
+      throw new Error('Session expired');
     }
-
-    return response;
   }
 
-  async get(endpoint) {
-    return this.request(endpoint, { method: 'GET' });
-  }
-
-  async post(endpoint, data) {
-    return this.request(endpoint, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
+  return response;
 }
 
 // Usage
-const authAPI = new APIClient('http://localhost:8009');
-const myAppAPI = new APIClient('http://localhost:3000');
-
-// Login
-await authAPI.post('/login', { email, password });
-
-// Access protected routes in your app
-const data = await myAppAPI.get('/api/user/profile');
-```
-
-#### Step 5: Google OAuth Integration
-
-```javascript
-// Redirect to Google OAuth
-function loginWithGoogle() {
-  window.location.href = 'http://localhost:8009/auth/google';
+export async function getUserProfile() {
+  const response = await fetchWithAuth(`${APP_API}/api/user/profile`);
+  return response.json();
 }
-
-// The auth service will redirect back to the callback URL
-// After successful authentication, extract the token from the response or cookie
 ```
 
 ---
 
-### Approach 2: Backend Proxy Pattern (Recommended for Server-Side Apps)
+### Approach 3: Backend Middleware Pattern
 
-Use this when your web app has its own backend (Node.js, Python, etc.).
-
-#### Architecture
-
-```mermaid
-graph LR
-    A[Client Browser] -->|Request| B[Your Web App Backend]
-    B -->|Validate Token| C[Auth Service]
-    C -->|User Info| B
-    B -->|Response| A
-```
-
-#### Example: Node.js/Express Backend
+If your app has its own backend, you can validate tokens there.
 
 ```javascript
 // middleware/auth.js
@@ -266,167 +301,64 @@ const axios = require('axios');
 
 const AUTH_SERVICE_URL = 'http://localhost:8009';
 
-async function validateToken(token) {
+async function authMiddleware(req, res, next) {
+  const accessToken = req.cookies['access_token'];
+  const refreshToken = req.cookies['refresh_token'];
+
+  if (!accessToken && !refreshToken) {
+    return res.status(401).json({ error: 'Unauthorized: No tokens' });
+  }
+
   try {
-    // Make a request to a protected endpoint to validate the token
+    // Validate access token with auth service
     const response = await axios.get(`${AUTH_SERVICE_URL}/api/`, {
       headers: {
-        'Authorization': `Bearer ${token}`
+        'Authorization': `Bearer ${accessToken}`,
+        'Cookie': `access_token=${accessToken}; refresh_token=${refreshToken}`
       }
     });
-    return response.status === 200;
+
+    // Decode token to get user info
+    const user = decodeToken(accessToken);
+    req.user = user;
+    next();
   } catch (error) {
-    return false;
+    if (error.response?.status === 401) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    }
+    return res.status(500).json({ error: 'Internal server error' });
   }
-}
-
-// Middleware to protect routes
-async function authMiddleware(req, res, next) {
-  const token = req.headers.authorization?.replace('Bearer ', '') || 
-                req.cookies['user-token'];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Unauthorized: No token provided' });
-  }
-
-  const isValid = await validateToken(token);
-  
-  if (!isValid) {
-    return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-  }
-
-  // Optionally decode the token to get user info
-  // (You could also create an endpoint in auth service to return user info)
-  req.user = decodeToken(token);
-  next();
 }
 
 function decodeToken(token) {
-  // Decode JWT (don't verify here, auth service already did)
   const base64Url = token.split('.')[1];
   const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-  const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => {
-    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-  }).join(''));
-
+  const jsonPayload = decodeURIComponent(
+    atob(base64).split('').map(c => {
+      return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+    }).join('')
+  );
   return JSON.parse(jsonPayload);
 }
 
 module.exports = { authMiddleware };
 ```
 
-```javascript
-// app.js
-const express = require('express');
-const { authMiddleware } = require('./middleware/auth');
-
-const app = express();
-
-// Public routes
-app.get('/public', (req, res) => {
-  res.json({ message: 'This is public' });
-});
-
-// Protected routes
-app.get('/api/profile', authMiddleware, (req, res) => {
-  res.json({
-    message: 'This is protected',
-    user: req.user
-  });
-});
-
-app.get('/api/admin', authMiddleware, (req, res) => {
-  // Additional role check
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Forbidden: Admin access required' });
-  }
-  
-  res.json({ message: 'Admin only content' });
-});
-
-app.listen(3000, () => {
-  console.log('App running on port 3000');
-});
-```
-
----
-
-### Approach 3: API Gateway Pattern (Production-Ready)
-
-For microservices architecture, use an API Gateway (like Kong, Traefik, or NGINX) to handle authentication.
-
-#### NGINX Example
-
-```nginx
-# nginx.conf
-http {
-  upstream auth_service {
-    server localhost:8009;
-  }
-
-  upstream app_service {
-    server localhost:3000;
-  }
-
-  server {
-    listen 80;
-
-    # Auth endpoints (public)
-    location /auth/ {
-      proxy_pass http://auth_service;
-    }
-
-    location /login {
-      proxy_pass http://auth_service;
-    }
-
-    location /signup {
-      proxy_pass http://auth_service;
-    }
-
-    # Protected app endpoints
-    location /api/ {
-      # Validate token with auth service
-      auth_request /auth/validate;
-      auth_request_set $user_id $upstream_http_x_user_id;
-      auth_request_set $user_role $upstream_http_x_user_role;
-
-      # Pass user info to app
-      proxy_set_header X-User-ID $user_id;
-      proxy_set_header X-User-Role $user_role;
-      
-      proxy_pass http://app_service;
-    }
-
-    # Internal validation endpoint
-    location = /auth/validate {
-      internal;
-      proxy_pass http://auth_service/api/;
-      proxy_pass_request_body off;
-      proxy_set_header Content-Length "";
-      proxy_set_header X-Original-URI $request_uri;
-    }
-  }
-}
-```
-
 ---
 
 ## Route Protection Strategies
 
-### 1. Client-Side Route Protection (React Example)
+### 1. Client-Side Route Protection (React)
 
 ```javascript
 // ProtectedRoute.jsx
 import { Navigate } from 'react-router-dom';
+import { isAuthenticated } from './auth';
 
 function ProtectedRoute({ children }) {
-  const token = localStorage.getItem('authToken');
-  
-  if (!token) {
+  if (!isAuthenticated()) {
     return <Navigate to="/login" replace />;
   }
-
   return children;
 }
 
@@ -440,16 +372,9 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         
-        {/* Protected routes */}
         <Route path="/dashboard" element={
           <ProtectedRoute>
             <Dashboard />
-          </ProtectedRoute>
-        } />
-        
-        <Route path="/profile" element={
-          <ProtectedRoute>
-            <Profile />
           </ProtectedRoute>
         } />
       </Routes>
@@ -458,284 +383,228 @@ function App() {
 }
 ```
 
-### 2. Server-Side Route Protection
-
-Already covered in Approach 2 above.
-
-### 3. Role-Based Access Control (RBAC)
+### 2. Role-Based Access Control
 
 ```javascript
-// Enhanced middleware with role checking
-function requireRole(...allowedRoles) {
-  return async (req, res, next) => {
-    const token = req.headers.authorization?.replace('Bearer ', '');
-    
-    if (!token) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+// RoleProtectedRoute.jsx
+import { Navigate } from 'react-router-dom';
+import { getAccessToken } from './auth';
 
-    const user = decodeToken(token);
-    
-    if (!allowedRoles.includes(user.role)) {
-      return res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
-    }
+function RoleProtectedRoute({ children, allowedRoles }) {
+  const token = getAccessToken();
+  
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
 
-    req.user = user;
-    next();
-  };
+  // Decode token to get role
+  const payload = JSON.parse(atob(token.split('.')[1]));
+  
+  if (!allowedRoles.includes(payload.role)) {
+    return <Navigate to="/forbidden" replace />;
+  }
+
+  return children;
 }
 
 // Usage
-app.get('/api/admin/users', requireRole('admin'), (req, res) => {
-  // Only admins can access
-});
-
-app.get('/api/content', requireRole('user', 'admin', 'moderator'), (req, res) => {
-  // Multiple roles allowed
-});
+<Route path="/admin" element={
+  <RoleProtectedRoute allowedRoles={['admin']}>
+    <AdminPanel />
+  </RoleProtectedRoute>
+} />
 ```
 
 ---
 
-## Recommended Modifications to Your Auth Service
+## Token Lifecycle
 
-To make integration easier, consider these enhancements:
+### Access Token
+- **Lifetime**: 15 minutes
+- **Purpose**: Authorize API requests
+- **Storage**: Cookie (`access_token`)
+- **Validation**: JWT signature + expiry check
 
-### 1. Return Token in Response Body
+### Refresh Token
+- **Lifetime**: 7 days
+- **Purpose**: Issue new access tokens
+- **Storage**: Cookie (`refresh_token`) + Database (hashed)
+- **Validation**: JWT signature + expiry + database status (not revoked)
 
-Modify [`login.go`](file:///Users/kshitijdhara/Public/user-authentication/routes/login.go#L40-L41) to return the token in JSON:
+### Auto-Refresh Flow
 
-```go
-ctx.JSON(200, gin.H{
-    "message": "Login successful",
-    "token": token,
-    "user_id": id,
-    "user_type": userType,
-})
-```
+When using the built-in gateway (`/app/*`):
 
-### 2. Add Token Validation Endpoint
-
-Add a dedicated endpoint to validate tokens and return user info:
-
-```go
-// In setupRoutes.go
-router.GET("/validate", helpers.AuthMiddleware(), func(ctx *gin.Context) {
-    userId := ctx.GetString("user_id")
-    role := ctx.GetString("role")
-    
-    ctx.JSON(200, gin.H{
-        "valid": true,
-        "user_id": userId,
-        "role": role,
-    })
-})
-```
-
-### 3. Add CORS Support
-
-```go
-// In main.go
-import "github.com/gin-contrib/cors"
-
-func startServer() {
-    router := gin.Default()
-    
-    // CORS configuration
-    router.Use(cors.New(cors.Config{
-        AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"},
-        AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-        AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-        ExposeHeaders:    []string{"Content-Length"},
-        AllowCredentials: true,
-    }))
-    
-    // ... rest of setup
-}
-```
+1. Client sends request with cookies
+2. Gateway validates `access_token`
+3. If expired:
+   - Validates `refresh_token`
+   - Issues new token pair
+   - Sets new cookies in response
+   - Forwards request to downstream service
+4. If refresh token invalid/expired:
+   - Returns 401 Unauthorized
+   - Client redirects to login
 
 ---
 
-## Complete Example: React + Express Integration
+## API Endpoints
 
-### Frontend (React)
+### Authentication
 
-```javascript
-// src/services/auth.js
-const AUTH_API = 'http://localhost:8009';
-
-export async function login(email, password) {
-  const response = await fetch(`${AUTH_API}/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-
-  if (response.ok) {
-    const token = getCookie('user-token');
-    localStorage.setItem('authToken', token);
-    return { success: true };
-  }
-  throw new Error('Login failed');
-}
-
-export function logout() {
-  localStorage.removeItem('authToken');
-  document.cookie = 'user-token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;';
-}
-
-export function getToken() {
-  return localStorage.getItem('authToken');
-}
-
-export function isAuthenticated() {
-  return !!getToken();
-}
-
-function getCookie(name) {
-  const value = `; ${document.cookie}`;
-  const parts = value.split(`; ${name}=`);
-  if (parts.length === 2) return parts.pop().split(';').shift();
-}
-```
-
-```javascript
-// src/services/api.js
-import { getToken } from './auth';
-
-const API_BASE = 'http://localhost:3000';
-
-export async function fetchProtected(endpoint) {
-  const token = getToken();
+- **`POST /signup`**
+  - Body: `{"email": "user@example.com", "password": "password", "fname": "John", "lname": "Doe", "type": "user"}`
+  - Response: Sets `access_token` and `refresh_token` cookies
   
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    headers: {
-      'Authorization': `Bearer ${token}`,
-    },
-  });
+- **`POST /login`**
+  - Body: `{"email": "user@example.com", "password": "password"}`
+  - Response: Sets `access_token` and `refresh_token` cookies
 
-  if (response.status === 401) {
-    window.location.href = '/login';
-    throw new Error('Unauthorized');
-  }
+- **`GET /auth/google`**
+  - Initiates Google OAuth flow
 
-  return response.json();
-}
-```
+- **`GET /auth/google/callback`**
+  - OAuth callback, issues token pair
 
-### Backend (Express)
+- **`GET /auth/google/logout`**
+  - OAuth logout, revokes tokens
 
-```javascript
-// server.js
-const express = require('express');
-const cors = require('cors');
-const { authMiddleware } = require('./middleware/auth');
+### Protected Routes
 
-const app = express();
+- **`GET /api/`**
+  - Requires: `access_token` (cookie or `Authorization: Bearer <token>`)
+  - Returns: Database health status
 
-app.use(cors({
-  origin: 'http://localhost:5173',
-  credentials: true
-}));
+- **`GET /api/logout`**
+  - Revokes refresh token and clears cookies
 
-app.use(express.json());
+### API Gateway
 
-// Protected routes
-app.get('/api/user/profile', authMiddleware, (req, res) => {
-  res.json({
-    userId: req.user.user_id,
-    role: req.user.role,
-    // Fetch additional user data from your database
-  });
-});
-
-app.listen(3000, () => {
-  console.log('App server running on port 3000');
-});
-```
+- **`ANY /app/*path`**
+  - Proxies to downstream service (configured in `main.go`)
+  - Auto-validates and refreshes tokens
+  - Adds headers: `X-User-ID`, `X-User-Role`, `Authorization`
 
 ---
 
 ## Security Best Practices
 
 > [!IMPORTANT]
-> Follow these security guidelines when integrating the auth service:
+> Follow these security guidelines:
 
-1. **Use HTTPS in Production**: Always use HTTPS for authentication endpoints
-2. **Secure Cookie Settings**: Set `Secure: true` and `SameSite: Strict` in production
-3. **Token Expiration**: Implement token refresh mechanism for long-lived sessions
-4. **CORS Configuration**: Only allow trusted origins
-5. **Rate Limiting**: Add rate limiting to login/signup endpoints
-6. **Input Validation**: Validate all user inputs on both client and server
-7. **Environment Variables**: Never hardcode secrets; use environment variables
+1. **HTTPS in Production**: Always use HTTPS. Update cookie settings:
+   ```go
+   ctx.SetCookie("access_token", accessToken, 900, "/", "yourdomain.com", true, true)
+   //                                                                      ^^^^
+   //                                                                    Secure flag
+   ```
+
+2. **SameSite Cookies**: Add `SameSite` attribute in production:
+   ```go
+   // Use gin's SetSameSite method
+   ctx.SetSameSite(http.SameSiteStrictMode)
+   ```
+
+3. **CORS Configuration**: Only allow trusted origins
+4. **Rate Limiting**: Add rate limiting to auth endpoints
+5. **Token Rotation**: Refresh tokens are automatically rotated on use
+6. **Revocation**: Logout properly revokes refresh tokens in database
 
 > [!WARNING]
-> The current implementation stores tokens in cookies with `Secure: false`. This is only acceptable for local development. In production, you MUST set `Secure: true` and use HTTPS.
+> Current cookie settings use `Secure: false` for local development. In production, you MUST set `Secure: true` and use HTTPS.
 
 ---
 
-## Testing Your Integration
+## Testing
 
-### 1. Test Authentication Flow
+### 1. Test Login Flow
 
 ```bash
 # Signup
-curl -X POST http://localhost:8009/signup \
+curl -v -X POST http://localhost:8009/signup \
   -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"password123","fname":"John","lname":"Doe","type":"user"}'
+  -d '{"email":"test@example.com","password":"password123","fname":"John","lname":"Doe","type":"user"}' \
+  -c cookies.txt
 
 # Login
-curl -X POST http://localhost:8009/login \
+curl -v -X POST http://localhost:8009/login \
   -H "Content-Type: application/json" \
   -d '{"email":"test@example.com","password":"password123"}' \
   -c cookies.txt
 
-# Access protected route
-curl -X GET http://localhost:8009/api/ \
-  -b cookies.txt
+# Check cookies
+cat cookies.txt
 ```
 
-### 2. Test with Authorization Header
+### 2. Test Auto-Refresh via Gateway
 
 ```bash
-# Login and extract token
-TOKEN=$(curl -X POST http://localhost:8009/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"password123"}' \
-  -c cookies.txt -s | grep -o 'user-token=[^;]*' | cut -d= -f2)
+# Access downstream service through gateway
+curl -v http://localhost:8009/app/profile \
+  -b cookies.txt
 
-# Use token in request
-curl -X GET http://localhost:8009/api/ \
-  -H "Authorization: Bearer $TOKEN"
+# The gateway will auto-refresh if access token expired
+# Check response headers for new Set-Cookie
+```
+
+### 3. Test Token Expiry
+
+```bash
+# Wait 15 minutes or manually tamper with access_token cookie
+# Then make a request - should auto-refresh
+
+curl -v http://localhost:8009/app/resource \
+  -b "refresh_token=<valid_refresh_token>; access_token=invalid"
+
+# Should return 200 with new tokens
 ```
 
 ---
 
 ## Troubleshooting
 
-### Issue: CORS Errors
+### Issue: 401 Unauthorized after login
 
-**Solution**: Add CORS middleware to your auth service (see modification #3 above)
+**Solution**: Ensure cookies are being sent. Use `credentials: 'include'` in fetch or `-b cookies.txt` in curl.
 
-### Issue: Token Not Being Sent
+### Issue: Auto-refresh not working
 
-**Solution**: Ensure `credentials: 'include'` is set in fetch requests, or use Authorization header
+**Solution**: Check that both `access_token` and `refresh_token` cookies are present. The gateway needs the refresh token to issue new tokens.
 
-### Issue: 401 Unauthorized on Valid Token
+### Issue: Tokens not persisting across requests
 
-**Solution**: Check that the token format is `Bearer <token>` and that the JWT_KEY environment variable matches
+**Solution**: Ensure cookie domain and path are correct. For local development, use `localhost` as domain.
 
-### Issue: Cookie Not Accessible
+### Issue: CORS errors
 
-**Solution**: Cookies are HttpOnly. Extract the token from the response or use a dedicated endpoint to return it
+**Solution**: Add CORS middleware to the auth service:
+```go
+import "github.com/gin-contrib/cors"
+
+router.Use(cors.New(cors.Config{
+    AllowOrigins:     []string{"http://localhost:3000"},
+    AllowCredentials: true,
+    AllowHeaders:     []string{"Content-Type", "Authorization"},
+}))
+```
+
+---
+
+## Migration from Single-Token
+
+If you're migrating from the old single-token system:
+
+1. **Update cookie names**: `user-token` → `access_token` + `refresh_token`
+2. **Update frontend**: Extract both cookies
+3. **Handle auto-refresh**: The gateway handles this automatically
+4. **Update logout**: Call `/api/logout` to revoke refresh token
 
 ---
 
 ## Next Steps
 
-1. **Implement Token Refresh**: Add refresh token mechanism for better UX
-2. **Add User Profile Endpoint**: Create endpoint to fetch user details
-3. **Implement Password Reset**: Add forgot password functionality
-4. **Add Email Verification**: Verify user emails before allowing login
-5. **Implement 2FA**: Add two-factor authentication for enhanced security
-6. **Add Audit Logging**: Log authentication events for security monitoring
+1. **Configure Downstream Services**: Update proxy routes in `main.go`
+2. **Add CORS**: Configure allowed origins for your frontend
+3. **Production Settings**: Update cookie security flags
+4. **Monitoring**: Add logging for token refresh events
+5. **Rate Limiting**: Protect auth endpoints from brute force
