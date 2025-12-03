@@ -1,98 +1,120 @@
-# user-authentication
+# User Authentication Service
 
-Small Go service using Gin and Postgres for user authentication (routes scaffolded).
+A plug-and-play microservice for user authentication and authorization, built with Go, Gin, and PostgreSQL.
 
-## Overview
+## Features
 
-This service exposes simple signup/login endpoints, Google OAuth flows, a protected API group, and a health endpoint. The HTTP router is configured in [`routes.SetupRoutes`](routes/setupRoutes.go). The app initializes database connectivity via [`database.GetDatabaseClient`](database/connect.go) in [`main.go`](main.go).
+- **User Registration**: Secure signup with password hashing (bcrypt).
+- **User Login**: JWT-based authentication.
+- **OAuth**: Google OAuth integration.
+- **Authorization**: Role-based access control (RBAC) ready middleware.
+- **Containerization**: Docker and Docker Compose support for easy deployment.
 
 ## Prerequisites
 
-- Go 1.25.3
-- PostgreSQL accessible from your machine
-- Google OAuth credentials (for OAuth flows)
+- Docker and Docker Compose
+- Go 1.25+ (for local development)
 
 ## Configuration
 
-Configuration is currently provided in two places:
+The service is configured via environment variables.
 
-- Short-term: default DB values in [database/connect.go](database/connect.go)
-- Secrets and OAuth IDs: file `.env` (example in repository)
+| Variable | Description | Default (Docker) |
+|----------|-------------|------------------|
+| `DB_HOST` | Database host | `db` |
+| `DB_PORT` | Database port | `5432` |
+| `DB_USER` | Database user | `postgres` |
+| `DB_PASSWORD` | Database password | `postgres` |
+| `DB_NAME` | Database name | `saga` |
+| `JWT_KEY` | Secret key for JWT signing | `supersecretkey` |
+| `GOOGLE_CLIENT_ID` | Google OAuth Client ID | - |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret | - |
 
-Important environment variables:
-- GOOGLE_CLIENT_ID
-- GOOGLE_CLIENT_SECRET
-- JWT_KEY
+## Getting Started
 
-The repository includes an example `.env` file (not checked in by default). You can set these in your shell or copy `.env` locally.
+### Using Docker (Recommended)
 
-To change DB connection parameters, edit [database/connect.go](database/connect.go) or extend it to read environment variables before starting the server.
+1.  **Clone the repository**.
+2.  **Create a `.env` file** (optional, defaults are in `docker-compose.yml`):
+    ```env
+    GOOGLE_CLIENT_ID=your_client_id
+    GOOGLE_CLIENT_SECRET=your_client_secret
+    ```
+3.  **Run with Docker Compose**:
+    ```bash
+    docker-compose up --build
+    ```
+    The service will be available at `http://localhost:8009`.
 
-## Build & Run
+### Local Development
 
-From the project root:
+1.  **Set up PostgreSQL**: Ensure a Postgres instance is running.
+2.  **Set Environment Variables**:
+    ```bash
+    export DB_HOST=localhost
+    export DB_PORT=5432
+    export DB_USER=postgres
+    export DB_PASSWORD=yourpassword
+    export DB_NAME=saga
+    export JWT_KEY=yoursecret
+    ```
+3.  **Run the application**:
+    ```bash
+    go run main.go
+    ```
 
-Build:
-```sh
-go build
+## API Endpoints
+
+### Authentication
+
+-   `POST /signup`
+    -   Body: `{"email": "user@example.com", "password": "password", "fname": "John", "lname": "Doe", "type": "user"}`
+    -   Description: Register a new user.
+
+-   `POST /login`
+    -   Body: `{"email": "user@example.com", "password": "password"}`
+    -   Description: Login and receive a JWT token (and cookie).
+
+-   `GET /auth/google`
+    -   Description: Initiate Google OAuth flow.
+
+-   `GET /auth/google/callback`
+    -   Description: Google OAuth callback.
+
+-   `GET /auth/google/logout`
+    -   Description: Logout.
+
+### Protected Routes
+
+-   `GET /api/`
+    -   Headers: `Authorization: Bearer <token>`
+    -   Description: Example protected route. Returns database status.
+
+-   `GET /api/logout`
+    -   Description: Logout handler.
+
+### Health
+
+-   `GET /health`
+    -   Description: Health check endpoint.
+
+## Database Schema
+
+The database schema is initialized automatically using `init.sql` when running with Docker.
+
+```sql
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    first_name VARCHAR(255),
+    last_name VARCHAR(255),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    user_type VARCHAR(50),
+    image JSONB DEFAULT '{}',
+    password VARCHAR(255),
+    version INT DEFAULT 1,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    permission VARCHAR(50) DEFAULT 'user',
+    is_verified BOOLEAN DEFAULT FALSE
+);
 ```
-
-Run (development):
-```sh
-go run main.go
-```
-
-The server listens on port `:8009` by default. Startup calls [`database.GetDatabaseClient`](database/connect.go) to ensure the DB is reachable.
-
-## Endpoints
-
-- POST /signup — create a new user (handler: [routes/login.go](routes/login.go))
-- POST /login — login and set JWT cookie (handler: [routes/login.go](routes/login.go))
-- GET /auth/:provider — start OAuth flow (Google supported)
-- GET /auth/:provider/callback — OAuth callback (Google)
-- GET /auth/:provider/logout — provider logout + clear local token
-- GET /health — DB health check (registered in [`routes.SetupRoutes`](routes/setupRoutes.go))
-- /api/* — protected routes under `/api` use [`helpers.AuthMiddleware`](helpers/middleware.go)
-
-Protected example:
-- GET /api/ — returns DB status (requires Authorization header)
-
-## Authentication details
-
-- JWT creation: [`helpers.CreateJWTToken`](helpers/user.go)
-- JWT validation: [`helpers.ValidateJWTToken`](helpers/user.go)
-- Middleware expects an Authorization header: `Authorization: Bearer <token>` (see [`helpers.AuthMiddleware`](helpers/middleware.go))
-- Login and OAuth also set an HTTP cookie `user-token` for convenience (see [routes/login.go](routes/login.go)). For API calls prefer Authorization header.
-
-## Google OAuth
-
-- Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and ensure redirect URI `http://localhost:8009/auth/google/callback` is allowed in Google Console.
-- OAuth providers are registered in `main.go` using goth.
-
-## Health & Troubleshooting
-
-- Health endpoint: `GET /health` — returns DB status and error details if unreachable.
-- If DB connection fails on startup, check DB credentials and that Postgres is reachable from the host.
-- To inspect DB connection behavior, see [database/connect.go](database/connect.go).
-
-## Security notes / Next steps
-
-- Move DB config and secrets out of source files into environment variables or a secrets manager.
-- Hash and salt passwords (not implemented yet).
-- Add migrations and proper user permissions.
-- Add CSRF protections and secure cookie flags (Secure=true for HTTPS).
-- Add unit/integration tests and CI.
-
-## Useful files
-
-- [main.go](main.go)
-- [database/connect.go](database/connect.go)
-- [routes/setupRoutes.go](routes/setupRoutes.go)
-- [routes/login.go](routes/login.go)
-- [helpers/user.go](helpers/user.go)
-- [helpers/middleware.go](helpers/middleware.go)
-- [.env](.env)
-
-## TODOs
-
-- set up krakenD to act as API gateway to other requests

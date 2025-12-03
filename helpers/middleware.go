@@ -13,12 +13,14 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 		tokenString = tokenString[len("Bearer "):]
-		_, err := ValidateJWTToken(tokenString)
+		userId, role, err := ValidateJWTToken(tokenString)
 		if err != nil {
 			ctx.String(401, "Unauthorized: invalid token")
 			ctx.Abort()
 			return
 		}
+		ctx.Set("user_id", userId)
+		ctx.Set("role", role)
 		ctx.Next()
 	}
 }

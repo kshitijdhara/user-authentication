@@ -36,13 +36,14 @@ func CreateUser(email, firstName, lastName, password, userType string) (string, 
 	return userId, nil
 }
 
-func CreateJWTToken(userId string) (string, error) {
+func CreateJWTToken(userId, role string) (string, error) {
 	key := os.Getenv("JWT_KEY")
 	if key == "" {
 		return "", fmt.Errorf("JWT_KEY environment variable not set")
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": userId,
+		"role":    role,
 		"exp":     time.Now().Add(time.Hour * 1).Unix(),
 	})
 	signedToken, err := token.SignedString([]byte(key))
@@ -52,10 +53,10 @@ func CreateJWTToken(userId string) (string, error) {
 	return signedToken, nil
 }
 
-func ValidateJWTToken(tokenString string) (string, error) {
+func ValidateJWTToken(tokenString string) (string, string, error) {
 	key := os.Getenv("JWT_KEY")
 	if key == "" {
-		return "", fmt.Errorf("JWT_KEY environment variable not set")
+		return "", "", fmt.Errorf("JWT_KEY environment variable not set")
 	}
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -64,14 +65,19 @@ func ValidateJWTToken(tokenString string) (string, error) {
 		return []byte(key), nil
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 		userId, ok := claims["user_id"].(string)
 		if !ok {
-			return "", fmt.Errorf("invalid token claims")
+			return "", "", fmt.Errorf("invalid token claims: user_id")
 		}
-		return userId, nil
+		role, ok := claims["role"].(string)
+		if !ok {
+			// fallback or error? Let's assume role is optional for now or default to user
+			role = "user"
+		}
+		return userId, role, nil
 	}
-	return "", fmt.Errorf("invalid token")
+	return "", "", fmt.Errorf("invalid token")
 }

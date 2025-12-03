@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/markbates/goth/gothic"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func userLogin(ctx *gin.Context) {
@@ -22,13 +23,17 @@ func userLogin(ctx *gin.Context) {
 		ctx.String(500, "Database connection error: %s, %s", err, db)
 		return
 	}
-	var storedPassword, id string
-	err = db.QueryRow("SELECT password, id FROM users WHERE email=$1", email).Scan(&storedPassword, &id)
+	var storedPassword, id, userType string
+	err = db.QueryRow("SELECT password, id, user_type FROM users WHERE email=$1", email).Scan(&storedPassword, &id, &userType)
 	if err != nil {
 		ctx.String(401, "Invalid username or password")
 		return
 	}
-	token, err := helpers.CreateJWTToken(id)
+	if err := bcrypt.CompareHashAndPassword([]byte(storedPassword), []byte(body.Password)); err != nil {
+		ctx.String(401, "Invalid username or password")
+		return
+	}
+	token, err := helpers.CreateJWTToken(id, userType)
 	if err != nil {
 		ctx.String(500, "Error creating JWT token: %s", err)
 	}
@@ -47,8 +52,13 @@ func userSignUp(ctx *gin.Context) {
 		ctx.String(500, "Database connection error: %s, %s", err, db)
 		return
 	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		ctx.String(500, "Error hashing password: %s", err)
+		return
+	}
 	_, err = db.Exec("INSERT INTO users (id, first_name, last_name, email, user_type, image, password, version, created_at, updated_at, permission, is_verified) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 1, NOW(), NOW(), 'user', false)",
-		body.FirstName, body.LastName, body.Email, body.Type, "{}", body.Password)
+		body.FirstName, body.LastName, body.Email, body.Type, "{}", string(hashedPassword))
 	if err != nil {
 		ctx.String(500, "Error creating user: %s", err)
 		return
@@ -96,7 +106,7 @@ func callBackHandler(ctx *gin.Context) {
 		}
 	}
 
-	token, err := helpers.CreateJWTToken(userId)
+	token, err := helpers.CreateJWTToken(userId, "user")
 	if err != nil {
 		ctx.AbortWithError(500, err)
 		return
